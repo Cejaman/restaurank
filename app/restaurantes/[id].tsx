@@ -4,17 +4,18 @@ import { useLocalSearchParams, useRouter } from "expo-router";
 import {
   addDoc,
   collection,
+  deleteDoc,
   doc,
-  getDoc,
   onSnapshot,
   query,
+  updateDoc,
   where,
 } from "firebase/firestore";
 import { getDownloadURL, ref, uploadBytes } from "firebase/storage";
 import React, { useEffect, useState } from "react";
 import {
   ActionSheetIOS,
-  ActivityIndicator, // 1. Importar ActionSheetIOS
+  ActivityIndicator,
   Alert,
   Dimensions,
   Image,
@@ -49,13 +50,25 @@ export default function RestauranteDetalleScreen() {
 
   const [activeTab, setActiveTab] = useState<"reviews" | "info" | "menu">("reviews");
 
-  // Estado Modal
-  const [modalVisible, setModalVisible] = useState(false);
-  const [newProductName, setNewProductName] = useState("");
-  const [newProductPrice, setNewProductPrice] = useState("");
-  const [newProductDesc, setNewProductDesc] = useState("");
-  const [newProductImage, setNewProductImage] = useState<string | null>(null);
-  const [addingProduct, setAddingProduct] = useState(false);
+  // Estado para cambio de imagen principal
+  const [uploadingImage, setUploadingImage] = useState(false);
+
+  // --- ESTADOS PARA MODAL DE MENÚ (Agregar/Editar) ---
+  const [menuModalVisible, setMenuModalVisible] = useState(false);
+  const [editingMenuItem, setEditingMenuItem] = useState<any>(null);
+  const [prodName, setProdName] = useState("");
+  const [prodPrice, setProdPrice] = useState("");
+  const [prodDesc, setProdDesc] = useState("");
+  const [prodImage, setProdImage] = useState<string | null>(null);
+  const [savingMenu, setSavingMenu] = useState(false);
+
+  // --- ESTADOS PARA MODAL DE RESTAURANTE (Editar Info) ---
+  const [restModalVisible, setRestModalVisible] = useState(false);
+  const [editDesc, setEditDesc] = useState("");
+  const [editOpenTime, setEditOpenTime] = useState("");
+  const [editCloseTime, setEditCloseTime] = useState("");
+  const [editPhone, setEditPhone] = useState("");
+  const [savingRest, setSavingRest] = useState(false);
 
   // 1. Cargar datos
   useEffect(() => {
@@ -63,14 +76,16 @@ export default function RestauranteDetalleScreen() {
       if (!id) return;
       try {
         const docRef = doc(db, "restaurants", id as string);
-        const snap = await getDoc(docRef);
-        if (snap.exists()) {
-          const data = snap.data();
-          setRestaurant(data);
-          if (currentUser && data.ownerId === currentUser.uid) {
-            setIsOwner(true);
-          }
-        }
+        const unsub = onSnapshot(docRef, (snap) => {
+            if (snap.exists()) {
+                const data = snap.data();
+                setRestaurant(data);
+                if (currentUser && data.ownerId === currentUser.uid) {
+                  setIsOwner(true);
+                }
+            }
+        });
+        return unsub;
       } catch (error) {
         console.error("Error obteniendo restaurante:", error);
       } finally {
@@ -105,62 +120,12 @@ export default function RestauranteDetalleScreen() {
     return () => unsub();
   }, [id]);
 
-  // --- 🗺️ LÓGICA DE NAVEGACIÓN (MAPAS) ---
-  const handleNavigate = () => {
-    if (!restaurant) return;
-
-    const lat = restaurant.location?.latitude || restaurant.latitude;
-    const lng = restaurant.location?.longitude || restaurant.longitude;
-    const label = restaurant.name;
-
-    // URL genérica de Google Maps (navegador) como fallback
-    const urlBrowser = `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
-
-    if (Platform.OS === "ios") {
-      // Menú nativo de iOS
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          options: ["Cancelar", "Apple Maps", "Google Maps", "Waze"],
-          cancelButtonIndex: 0,
-        },
-        (buttonIndex) => {
-          if (buttonIndex === 1) {
-            Linking.openURL(`maps:0,0?q=${label}@${lat},${lng}`);
-          } else if (buttonIndex === 2) {
-            Linking.openURL(`comgooglemaps://?q=${label}&center=${lat},${lng}`).catch(() =>
-              Linking.openURL(urlBrowser)
-            );
-          } else if (buttonIndex === 3) {
-            Linking.openURL(`waze://?ll=${lat},${lng}&navigate=yes`).catch(() =>
-              Linking.openURL(urlBrowser)
-            );
-          }
-        }
-      );
-    } else {
-      // Android: Abre el selector nativo de aplicaciones de mapa
-      const url = `geo:0,0?q=${lat},${lng}(${label})`;
-      Linking.openURL(url).catch(() => Linking.openURL(urlBrowser));
-    }
-  };
-  // -----------------------------------------
-
-  const pickProductImage = async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ImagePicker.MediaTypeOptions.Images,
-      allowsEditing: true,
-      aspect: [1, 1],
-      quality: 0.7,
-    });
-    if (!result.canceled) setNewProductImage(result.assets[0].uri);
-  };
-
-  const uploadImage = async (uri: string) => {
+  // --- 📸 SUBIR IMAGEN GENÉRICA ---
+  const uploadImageToStorage = async (uri: string, path: string) => {
     try {
       const response = await fetch(uri);
       const blob = await response.blob();
-      const filename = `menuItems/${id}/${Date.now()}.jpg`;
-      const storageRef = ref(storage, filename);
+      const storageRef = ref(storage, path);
       await uploadBytes(storageRef, blob);
       return await getDownloadURL(storageRef);
     } catch (error) {
@@ -169,40 +134,192 @@ export default function RestauranteDetalleScreen() {
     }
   };
 
-  const handleAddProduct = async () => {
-    if (!newProductName || !newProductPrice) {
+  // ============================================================
+  // 🖼️ LÓGICA CAMBIAR FOTO PORTADA (NUEVO)
+  // ============================================================
+  const handleChangeMainImage = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [16, 9], // Formato panorámico para portada
+        quality: 0.8,
+    });
+
+    if (!result.canceled && result.assets[0].uri) {
+        const localUri = result.assets[0].uri;
+        setUploadingImage(true);
+        try {
+            // Subir a storage
+            const filename = `restaurants/${id}/main_photo_${Date.now()}.jpg`;
+            const downloadURL = await uploadImageToStorage(localUri, filename);
+
+            // Actualizar Firestore
+            const restRef = doc(db, "restaurants", id as string);
+            await updateDoc(restRef, {
+                photoURL: downloadURL
+            });
+            
+            Alert.alert("Éxito", "Foto de portada actualizada.");
+        } catch (error) {
+            console.error("Error cambiando foto:", error);
+            Alert.alert("Error", "No se pudo subir la imagen.");
+        } finally {
+            setUploadingImage(false);
+        }
+    }
+  };
+
+  // ============================================================
+  // 🗺️ NAVEGACIÓN MAPAS
+  // ============================================================
+  const handleNavigate = () => {
+    if (!restaurant) return;
+    const lat = restaurant.location?.latitude || restaurant.latitude;
+    const lng = restaurant.location?.longitude || restaurant.longitude;
+    const label = restaurant.name;
+    const urlBrowser = `https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+
+    if (Platform.OS === "ios") {
+      ActionSheetIOS.showActionSheetWithOptions(
+        { options: ["Cancelar", "Apple Maps", "Google Maps", "Waze"], cancelButtonIndex: 0 },
+        (buttonIndex) => {
+          if (buttonIndex === 1) Linking.openURL(`maps:0,0?q=${label}@${lat},${lng}`);
+          else if (buttonIndex === 2) Linking.openURL(`comgooglemaps://?q=${label}&center=${lat},${lng}`).catch(() => Linking.openURL(urlBrowser));
+          else if (buttonIndex === 3) Linking.openURL(`waze://?ll=${lat},${lng}&navigate=yes`).catch(() => Linking.openURL(urlBrowser));
+        }
+      );
+    } else {
+      const url = `geo:0,0?q=${lat},${lng}(${label})`;
+      Linking.openURL(url).catch(() => Linking.openURL(urlBrowser));
+    }
+  };
+
+  // ============================================================
+  // 🍔 LÓGICA DEL MENÚ
+  // ============================================================
+
+  // Selección de foto para producto
+  const pickProductImage = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ImagePicker.MediaTypeOptions.Images,
+      allowsEditing: true, aspect: [1, 1], quality: 0.7,
+    });
+    if (!result.canceled) setProdImage(result.assets[0].uri);
+  };
+
+  const openMenuModal = (item: any = null) => {
+    if (item) {
+        setEditingMenuItem(item);
+        setProdName(item.name);
+        setProdPrice(item.price);
+        setProdDesc(item.description || "");
+        setProdImage(item.photoURL || null);
+    } else {
+        setEditingMenuItem(null);
+        setProdName("");
+        setProdPrice("");
+        setProdDesc("");
+        setProdImage(null);
+    }
+    setMenuModalVisible(true);
+  };
+
+  const handleSaveMenu = async () => {
+    if (!prodName || !prodPrice) {
       Alert.alert("Error", "Nombre y precio son obligatorios.");
       return;
     }
-    setAddingProduct(true);
+    setSavingMenu(true);
     try {
-      let downloadURL = null;
-      if (newProductImage) {
-        downloadURL = await uploadImage(newProductImage);
+      let downloadURL = prodImage;
+      if (prodImage && prodImage.startsWith('file')) {
+        const filename = `menuItems/${id}/${Date.now()}.jpg`;
+        downloadURL = await uploadImageToStorage(prodImage, filename);
       }
 
       const menuRef = collection(db, "restaurants", id as string, "menu");
-      await addDoc(menuRef, {
-        name: newProductName,
-        price: newProductPrice,
-        description: newProductDesc,
-        photoURL: downloadURL,
-        createdAt: new Date(),
-      });
 
-      setModalVisible(false);
-      setNewProductName("");
-      setNewProductPrice("");
-      setNewProductDesc("");
-      setNewProductImage(null);
-      Alert.alert("Éxito", "Producto agregado al menú.");
+      if (editingMenuItem) {
+          await updateDoc(doc(menuRef, editingMenuItem.id), {
+            name: prodName,
+            price: prodPrice,
+            description: prodDesc,
+            photoURL: downloadURL,
+          });
+          Alert.alert("Actualizado", "Producto modificado.");
+      } else {
+          await addDoc(menuRef, {
+            name: prodName,
+            price: prodPrice,
+            description: prodDesc,
+            photoURL: downloadURL,
+            createdAt: new Date(),
+          });
+          Alert.alert("Agregado", "Producto agregado.");
+      }
+      setMenuModalVisible(false);
     } catch (error) {
-      console.error("Error al agregar producto:", error);
-      Alert.alert("Error", "No se pudo agregar el producto.");
+      console.error("Error menu:", error);
+      Alert.alert("Error", "No se pudo guardar.");
     } finally {
-      setAddingProduct(false);
+      setSavingMenu(false);
     }
   };
+
+  const handleDeleteMenuItem = (itemId: string) => {
+      Alert.alert(
+          "Eliminar Producto",
+          "¿Seguro que quieres eliminar este platillo?",
+          [
+              { text: "Cancelar", style: "cancel" },
+              { 
+                  text: "Eliminar", 
+                  style: "destructive",
+                  onPress: async () => {
+                      try {
+                          await deleteDoc(doc(db, "restaurants", id as string, "menu", itemId));
+                      } catch (error) {
+                          console.error("Error eliminando:", error);
+                      }
+                  }
+              }
+          ]
+      );
+  };
+
+  // ============================================================
+  // 🏢 LÓGICA DEL RESTAURANTE (EDITAR INFO)
+  // ============================================================
+
+  const openRestModal = () => {
+      setEditDesc(restaurant.description || "");
+      setEditOpenTime(restaurant.openTime || "");
+      setEditCloseTime(restaurant.closeTime || "");
+      setEditPhone(restaurant.phone || "");
+      setRestModalVisible(true);
+  };
+
+  const handleSaveRestaurantInfo = async () => {
+      setSavingRest(true);
+      try {
+          const restRef = doc(db, "restaurants", id as string);
+          await updateDoc(restRef, {
+              description: editDesc,
+              openTime: editOpenTime,
+              closeTime: editCloseTime,
+              phone: editPhone
+          });
+          setRestModalVisible(false);
+          Alert.alert("Éxito", "Información actualizada.");
+      } catch (error) {
+          console.error("Error info:", error);
+          Alert.alert("Error", "No se pudo actualizar.");
+      } finally {
+          setSavingRest(false);
+      }
+  };
+
+  // ============================================================
 
   const handleCall = () => restaurant?.phone && Linking.openURL(`tel:${restaurant.phone}`);
   const handleEmail = () => restaurant?.email && Linking.openURL(`mailto:${restaurant.email}`);
@@ -217,16 +334,33 @@ export default function RestauranteDetalleScreen() {
     <View style={styles.container}>
       <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: 40 }}>
         
-        {/* Header Imagen */}
+        {/* HEADER IMAGEN CON EDICIÓN */}
         <View style={styles.imageContainer}>
           <Image
             source={{ uri: restaurant.photoURL || "https://via.placeholder.com/500x300?text=Sin+Imagen" }}
             style={styles.image}
           />
           <View style={styles.imageOverlay} />
+          
+          {/* Botón Regresar */}
           <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
             <Ionicons name="arrow-back" size={24} color="#fff" />
           </TouchableOpacity>
+
+          {/* 📸 BOTÓN CAMBIAR FOTO (SOLO DUEÑOS) */}
+          {isOwner && (
+              <TouchableOpacity 
+                style={styles.editImageButton} 
+                onPress={handleChangeMainImage}
+                disabled={uploadingImage}
+              >
+                {uploadingImage ? (
+                    <ActivityIndicator size="small" color="#3EB489" />
+                ) : (
+                    <Ionicons name="camera" size={22} color="#333" />
+                )}
+              </TouchableOpacity>
+          )}
         </View>
 
         {/* Contenido */}
@@ -257,14 +391,14 @@ export default function RestauranteDetalleScreen() {
               <Text style={[styles.tabText, activeTab === "reviews" && styles.activeTabText]}>Reseñas</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.tabButton, activeTab === "info" && styles.activeTabButton]} onPress={() => setActiveTab("info")}>
-              <Text style={[styles.tabText, activeTab === "info" && styles.activeTabText]}>Información</Text>
+              <Text style={[styles.tabText, activeTab === "info" && styles.activeTabText]}>Info</Text>
             </TouchableOpacity>
             <TouchableOpacity style={[styles.tabButton, activeTab === "menu" && styles.activeTabButton]} onPress={() => setActiveTab("menu")}>
               <Text style={[styles.tabText, activeTab === "menu" && styles.activeTabText]}>Menú</Text>
             </TouchableOpacity>
           </View>
 
-          {/* Reseñas */}
+          {/* --- TAB RESEÑAS --- */}
           {activeTab === "reviews" && (
             <View style={{ marginTop: 10 }}>
                 {reviews.length === 0 ? (
@@ -276,12 +410,9 @@ export default function RestauranteDetalleScreen() {
                     reviews.map((review) => {
                         let dateStr = "";
                         if(review.time && typeof review.time.toDate === 'function') {
-                            dateStr = review.time.toDate().toLocaleDateString("es-MX", {
-                                day: 'numeric', month: 'short'
-                            });
+                            dateStr = review.time.toDate().toLocaleDateString("es-MX", { day: 'numeric', month: 'short' });
                         }
                         const userImg = review.userImage || "https://i.imgur.com/8Km9tLL.png";
-
                         return (
                             <View key={review.id} style={styles.reviewCard}>
                                 <View style={styles.reviewHeader}>
@@ -293,18 +424,11 @@ export default function RestauranteDetalleScreen() {
                                 </View>
                                 <View style={styles.ratingRow}>
                                     {[...Array(5)].map((_, i) => (
-                                        <Ionicons 
-                                            key={i} 
-                                            name={i < Math.round(parseFloat(review.rating)) ? "star" : "star-outline"} 
-                                            size={14} 
-                                            color="#FFD700" 
-                                        />
+                                        <Ionicons key={i} name={i < Math.round(parseFloat(review.rating)) ? "star" : "star-outline"} size={14} color="#FFD700" />
                                     ))}
                                 </View>
                                 <Text style={styles.reviewText}>{review.text}</Text>
-                                {review.image && (
-                                    <Image source={{ uri: review.image }} style={styles.reviewImage} />
-                                )}
+                                {review.image && (<Image source={{ uri: review.image }} style={styles.reviewImage} />)}
                             </View>
                         );
                     })
@@ -312,9 +436,16 @@ export default function RestauranteDetalleScreen() {
             </View>
           )}
 
-          {/* Información */}
+          {/* --- TAB INFORMACIÓN --- */}
           {activeTab === "info" && (
             <View style={{ marginTop: 20 }}>
+              {isOwner && (
+                  <TouchableOpacity style={styles.editInfoButton} onPress={openRestModal}>
+                      <Ionicons name="create-outline" size={20} color="#FFF" />
+                      <Text style={styles.editInfoText}>Editar Información</Text>
+                  </TouchableOpacity>
+              )}
+
               <Text style={styles.sectionTitle}>Sobre nosotros</Text>
               <Text style={styles.description}>
                 {restaurant.description && restaurant.description.trim() !== "" ? restaurant.description : "El dueño no ha añadido una descripción detallada todavía."}
@@ -354,23 +485,18 @@ export default function RestauranteDetalleScreen() {
                   initialRegion={{ latitude: lat, longitude: long, latitudeDelta: 0.005, longitudeDelta: 0.005 }}
                   scrollEnabled={false} zoomEnabled={false}
                 >
-                  {/* 👇 🔴 AHORA EL PIN ES TOCABLE PARA NAVEGAR */}
-                  <Marker 
-                    coordinate={{ latitude: lat, longitude: long }} 
-                    onPress={handleNavigate}
-                  />
+                  <Marker coordinate={{ latitude: lat, longitude: long }} onPress={handleNavigate} />
                 </MapView>
               </View>
-              {/* Mensaje sutil para indicar que pueden tocar */}
               <Text style={styles.mapHintText}>Toca el pin para navegar 🚗</Text>
             </View>
           )}
 
-          {/* Menú */}
+          {/* --- TAB MENÚ --- */}
           {activeTab === "menu" && (
             <View style={{ marginTop: 10 }}>
               {isOwner && (
-                <TouchableOpacity style={styles.addMenuButton} onPress={() => setModalVisible(true)}>
+                <TouchableOpacity style={styles.addMenuButton} onPress={() => openMenuModal(null)}>
                   <Ionicons name="add-circle" size={24} color="#fff" />
                   <Text style={styles.addMenuButtonText}>Agregar Producto</Text>
                 </TouchableOpacity>
@@ -386,11 +512,11 @@ export default function RestauranteDetalleScreen() {
                 menuItems.map((item) => (
                   <View key={item.id} style={styles.menuItemCard}>
                     {item.photoURL ? (
-                       <Image source={{ uri: item.photoURL }} style={styles.menuItemImage} />
+                        <Image source={{ uri: item.photoURL }} style={styles.menuItemImage} />
                     ) : (
-                       <View style={[styles.menuItemImage, {backgroundColor: '#EEE', alignItems:'center', justifyContent:'center'}]}>
+                        <View style={[styles.menuItemImage, {backgroundColor: '#EEE', alignItems:'center', justifyContent:'center'}]}>
                            <Ionicons name="fast-food" size={24} color="#CCC" />
-                       </View>
+                        </View>
                     )}
                     
                     <View style={{flex: 1, paddingHorizontal: 12}}>
@@ -398,6 +524,18 @@ export default function RestauranteDetalleScreen() {
                         {item.description ? <Text style={styles.menuItemDesc} numberOfLines={2}>{item.description}</Text> : null}
                         <Text style={styles.menuItemPrice}>${item.price}</Text>
                     </View>
+
+                    {/* 🔧 BOTONES DE EDICIÓN PARA DUEÑOS */}
+                    {isOwner && (
+                        <View style={styles.menuActions}>
+                            <TouchableOpacity onPress={() => openMenuModal(item)} style={styles.actionBtnEdit}>
+                                <Ionicons name="pencil" size={18} color="#3EB489" />
+                            </TouchableOpacity>
+                            <TouchableOpacity onPress={() => handleDeleteMenuItem(item.id)} style={styles.actionBtnDelete}>
+                                <Ionicons name="trash" size={18} color="#FF4444" />
+                            </TouchableOpacity>
+                        </View>
+                    )}
                   </View>
                 ))
               )}
@@ -406,61 +544,46 @@ export default function RestauranteDetalleScreen() {
         </View>
       </ScrollView>
 
-      {/* Modal */}
-      <Modal
-        animationType="slide"
-        transparent={true}
-        visible={modalVisible}
-        onRequestClose={() => setModalVisible(false)}
-      >
+      {/* MODALES (Menú y Restaurante) */}
+      <Modal animationType="slide" transparent={true} visible={menuModalVisible} onRequestClose={() => setMenuModalVisible(false)}>
         <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
             <View style={styles.modalContainer}>
-                <KeyboardAvoidingView 
-                    behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-                    style={{ width: '100%', alignItems: 'center' }}
-                >
+                <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ width: '100%', alignItems: 'center' }}>
                     <View style={styles.modalContent}>
-                        <Text style={styles.modalTitle}>Nuevo Producto</Text>
-                        
+                        <Text style={styles.modalTitle}>{editingMenuItem ? "Editar Producto" : "Nuevo Producto"}</Text>
                         <TouchableOpacity style={styles.modalImagePicker} onPress={pickProductImage}>
-                            {newProductImage ? (
-                                <Image source={{ uri: newProductImage }} style={styles.modalImagePreview} />
-                            ) : (
-                                <View style={{alignItems: 'center'}}>
-                                    <Ionicons name="camera-outline" size={32} color="#3EB489" />
-                                    <Text style={styles.modalImageText}>Agregar Foto</Text>
-                                </View>
-                            )}
+                            {prodImage ? <Image source={{ uri: prodImage }} style={styles.modalImagePreview} /> : <View style={{alignItems: 'center'}}><Ionicons name="camera-outline" size={32} color="#3EB489" /><Text style={styles.modalImageText}>Agregar Foto</Text></View>}
                         </TouchableOpacity>
-
-                        <TextInput 
-                        style={styles.modalInput} 
-                        placeholder="Nombre del platillo" 
-                        value={newProductName}
-                        onChangeText={setNewProductName}
-                        />
-                        <TextInput 
-                        style={styles.modalInput} 
-                        placeholder="Precio (ej. 120)" 
-                        keyboardType="numeric"
-                        value={newProductPrice}
-                        onChangeText={setNewProductPrice}
-                        />
-                        <TextInput 
-                        style={[styles.modalInput, {height: 80, textAlignVertical: 'top'}]} 
-                        placeholder="Descripción corta" 
-                        multiline
-                        value={newProductDesc}
-                        onChangeText={setNewProductDesc}
-                        />
-
+                        <TextInput style={styles.modalInput} placeholder="Nombre del platillo" value={prodName} onChangeText={setProdName} />
+                        <TextInput style={styles.modalInput} placeholder="Precio (ej. 120)" keyboardType="numeric" value={prodPrice} onChangeText={setProdPrice} />
+                        <TextInput style={[styles.modalInput, {height: 80, textAlignVertical: 'top'}]} placeholder="Descripción corta" multiline value={prodDesc} onChangeText={setProdDesc} />
                         <View style={styles.modalButtons}>
-                        <TouchableOpacity style={styles.modalBtnCancel} onPress={() => setModalVisible(false)}>
-                            <Text style={styles.modalBtnTextCancel}>Cancelar</Text>
-                        </TouchableOpacity>
-                        <TouchableOpacity style={styles.modalBtnSave} onPress={handleAddProduct} disabled={addingProduct}>
-                            {addingProduct ? <ActivityIndicator color="#fff"/> : <Text style={styles.modalBtnTextSave}>Guardar</Text>}
-                        </TouchableOpacity>
+                        <TouchableOpacity style={styles.modalBtnCancel} onPress={() => setMenuModalVisible(false)}><Text style={styles.modalBtnTextCancel}>Cancelar</Text></TouchableOpacity>
+                        <TouchableOpacity style={styles.modalBtnSave} onPress={handleSaveMenu} disabled={savingMenu}>{savingMenu ? <ActivityIndicator color="#fff"/> : <Text style={styles.modalBtnTextSave}>Guardar</Text>}</TouchableOpacity>
+                        </View>
+                    </View>
+                </KeyboardAvoidingView>
+            </View>
+        </TouchableWithoutFeedback>
+      </Modal>
+
+      <Modal animationType="slide" transparent={true} visible={restModalVisible} onRequestClose={() => setRestModalVisible(false)}>
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+            <View style={styles.modalContainer}>
+                <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={{ width: '100%', alignItems: 'center' }}>
+                    <View style={styles.modalContent}>
+                        <Text style={styles.modalTitle}>Editar Información</Text>
+                        <Text style={styles.labelInput}>Descripción</Text>
+                        <TextInput style={[styles.modalInput, {height: 80, textAlignVertical: 'top'}]} placeholder="Describe tu restaurante..." multiline value={editDesc} onChangeText={setEditDesc} />
+                        <Text style={styles.labelInput}>Horario Apertura</Text>
+                        <TextInput style={styles.modalInput} placeholder="Ej. 08:00 AM" value={editOpenTime} onChangeText={setEditOpenTime} />
+                        <Text style={styles.labelInput}>Horario Cierre</Text>
+                        <TextInput style={styles.modalInput} placeholder="Ej. 10:00 PM" value={editCloseTime} onChangeText={setEditCloseTime} />
+                        <Text style={styles.labelInput}>Teléfono</Text>
+                        <TextInput style={styles.modalInput} placeholder="Teléfono de contacto" keyboardType="phone-pad" value={editPhone} onChangeText={setEditPhone} />
+                        <View style={styles.modalButtons}>
+                            <TouchableOpacity style={styles.modalBtnCancel} onPress={() => setRestModalVisible(false)}><Text style={styles.modalBtnTextCancel}>Cancelar</Text></TouchableOpacity>
+                            <TouchableOpacity style={styles.modalBtnSave} onPress={handleSaveRestaurantInfo} disabled={savingRest}>{savingRest ? <ActivityIndicator color="#fff"/> : <Text style={styles.modalBtnTextSave}>Actualizar</Text>}</TouchableOpacity>
                         </View>
                     </View>
                 </KeyboardAvoidingView>
@@ -479,6 +602,14 @@ const styles = StyleSheet.create({
   image: { width: "100%", height: "100%", resizeMode: "cover" },
   imageOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: 'rgba(0,0,0,0.2)' },
   backButton: { position: "absolute", top: 50, left: 20, backgroundColor: "rgba(0,0,0,0.5)", padding: 8, borderRadius: 20 },
+  
+  // 📸 Estilo del botón de editar foto
+  editImageButton: { 
+    position: "absolute", bottom: 40, right: 20, 
+    backgroundColor: "#fff", padding: 10, borderRadius: 25,
+    shadowColor: "#000", shadowOpacity: 0.2, shadowOffset: { width: 0, height: 2 }, elevation: 5
+  },
+
   contentContainer: { flex: 1, backgroundColor: "#fff", marginTop: -30, borderTopLeftRadius: 30, borderTopRightRadius: 30, paddingHorizontal: 20, paddingTop: 25, minHeight: 500 },
   headerInfo: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
   category: { fontSize: 14, color: "#3EB489", fontWeight: "700", textTransform: "uppercase", marginBottom: 4 },
@@ -507,7 +638,7 @@ const styles = StyleSheet.create({
   contactButtonText: { color: "#fff", fontWeight: "600", fontSize: 15 },
   mapContainer: { borderRadius: 16, overflow: "hidden", height: 200, marginTop: 10 },
   map: { width: "100%", height: "100%" },
-  mapHintText: { textAlign: 'center', color: '#888', fontSize: 12, marginTop: 6, fontStyle: 'italic' }, // Nuevo estilo para el texto de ayuda
+  mapHintText: { textAlign: 'center', color: '#888', fontSize: 12, marginTop: 6, fontStyle: 'italic' },
 
   emptyBox: { alignItems: 'center', paddingVertical: 40 },
   emptyText: { fontSize: 16, fontWeight: '600', color: '#333' },
@@ -524,6 +655,9 @@ const styles = StyleSheet.create({
 
   addMenuButton: { backgroundColor: "#3EB489", flexDirection: "row", alignItems: "center", justifyContent: "center", padding: 12, borderRadius: 12, marginBottom: 15 },
   addMenuButtonText: { color: "#fff", fontWeight: "bold", marginLeft: 8 },
+  editInfoButton: { backgroundColor: "#2E2E2E", flexDirection: "row", alignItems: "center", justifyContent: "center", padding: 10, borderRadius: 10, marginBottom: 15 },
+  editInfoText: { color: "#fff", marginLeft: 8, fontWeight: "600" },
+
   menuPlaceholder: { alignItems: "center", justifyContent: "center", paddingVertical: 50 },
   menuPlaceholderText: { fontSize: 18, fontWeight: "600", color: "#555", marginTop: 10 },
   menuPlaceholderSub: { fontSize: 14, color: "#999", marginTop: 5 },
@@ -533,6 +667,10 @@ const styles = StyleSheet.create({
   menuItemName: { fontSize: 16, fontWeight: '700', color: '#333' },
   menuItemDesc: { fontSize: 13, color: '#666', marginTop: 2 },
   menuItemPrice: { fontSize: 15, fontWeight: 'bold', color: "#3EB489", marginTop: 5 },
+  
+  menuActions: { alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  actionBtnEdit: { padding: 6 },
+  actionBtnDelete: { padding: 6 },
 
   modalContainer: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "center", alignItems: "center" },
   modalContent: { width: "85%", backgroundColor: "#FFF", borderRadius: 16, padding: 20 },
@@ -543,6 +681,7 @@ const styles = StyleSheet.create({
   modalImageText: { color: '#3EB489', fontWeight: '600', marginTop: 5 },
 
   modalInput: { borderWidth: 1, borderColor: "#DDD", borderRadius: 8, padding: 10, marginBottom: 12, fontSize: 16 },
+  labelInput: { fontSize: 12, color: "#888", marginBottom: 4, fontWeight: "600" },
   modalButtons: { flexDirection: "row", justifyContent: "space-between", marginTop: 10 },
   modalBtnCancel: { flex: 1, padding: 12, alignItems: "center" },
   modalBtnSave: { flex: 1, backgroundColor: "#3EB489", padding: 12, borderRadius: 8, alignItems: "center" },

@@ -1,28 +1,35 @@
 import { Ionicons } from "@expo/vector-icons";
 import { useLocalSearchParams, useRouter } from "expo-router";
+import { EmailAuthProvider, reauthenticateWithCredential } from "firebase/auth"; // 🔐 Importante para verificar contraseña
 import {
-    arrayRemove,
-    arrayUnion,
-    collection,
-    deleteDoc,
-    doc,
-    getDoc,
-    getDocs,
-    orderBy,
-    query,
-    setDoc,
-    updateDoc,
-    where,
+  arrayRemove,
+  arrayUnion,
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  orderBy,
+  query,
+  setDoc,
+  where,
 } from "firebase/firestore";
 import React, { useEffect, useState } from "react";
 import {
-    ActivityIndicator,
-    Image,
-    ScrollView,
-    StyleSheet,
-    Text,
-    TouchableOpacity,
-    View,
+  ActivityIndicator,
+  Alert,
+  Image,
+  Keyboard,
+  KeyboardAvoidingView,
+  Modal,
+  Platform,
+  ScrollView,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  TouchableWithoutFeedback,
+  View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { COLORS } from "../../constants/Theme";
@@ -37,9 +44,18 @@ function getLevelInfo(uniqueReviews: number) {
 }
 
 export default function PerfilVisitanteScreen() {
-  const { id } = useLocalSearchParams(); // ID del usuario a visitar
+  const { id } = useLocalSearchParams();
   const router = useRouter();
   const currentUser = auth.currentUser;
+
+  // 👇👇👇 AQUÍ ESTABA EL ERROR, ESTA ES LA CORRECCIÓN 👇👇👇
+  // Si 'id' viene en la URL (visitante), úsalo. Si no (mi perfil), usa currentUser.uid
+  const paramId = Array.isArray(id) ? id[0] : id;
+  const targetUserId = paramId || currentUser?.uid;
+  
+  // Determinamos si soy yo
+  const isMyProfile = currentUser?.uid === targetUserId;
+  // 👆👆👆 FIN DE LA CORRECCIÓN 👆👆👆
 
   const [userData, setUserData] = useState<any>(null);
   const [stats, setStats] = useState({ globalRating: 0, totalPosts: 0, followers: 0, uniqueReviews: 0 });
@@ -50,14 +66,24 @@ export default function PerfilVisitanteScreen() {
   const [isFollowing, setIsFollowing] = useState(false);
   const [loadingFollow, setLoadingFollow] = useState(false);
 
+  // --- ESTADOS PARA ELIMINAR CON CONTRASEÑA ---
+  const [deleteModalVisible, setDeleteModalVisible] = useState(false);
+  const [restaurantToDelete, setRestaurantToDelete] = useState<{id: string, name: string} | null>(null);
+  const [password, setPassword] = useState("");
+  const [loadingDelete, setLoadingDelete] = useState(false);
+
   // 1. Cargar Datos
   useEffect(() => {
     const loadData = async () => {
-      if (!id) return;
+      // Esperar a que haya un ID válido
+      if (!targetUserId) {
+          setLoading(false);
+          return;
+      }
       
       try {
         // A. Datos del Usuario
-        const userDocRef = doc(db, "users", id as string);
+        const userDocRef = doc(db, "users", targetUserId);
         const userSnap = await getDoc(userDocRef);
         
         if (!userSnap.exists()) {
@@ -66,7 +92,7 @@ export default function PerfilVisitanteScreen() {
         }
         
         const userInfo = userSnap.data();
-        setUserData({ ...userInfo, uid: id });
+        setUserData({ ...userInfo, uid: targetUserId });
 
         // B. Verificar si YO lo sigo
         if (currentUser) {
@@ -80,9 +106,9 @@ export default function PerfilVisitanteScreen() {
         let ratingAvg = 0;
 
         if (userInfo?.role === "negocio") {
-             // NEGOCIO
+             // NEGOCIO: Cargar restaurantes Y posts
              const restRef = collection(db, "restaurants");
-             const qRest = query(restRef, where("ownerId", "==", id));
+             const qRest = query(restRef, where("ownerId", "==", targetUserId));
              const restSnap = await getDocs(qRest);
              setMyRestaurants(restSnap.docs.map(d => ({id: d.id, ...d.data()})));
              
@@ -95,7 +121,7 @@ export default function PerfilVisitanteScreen() {
 
         } else {
              // PERSONA
-             const q = query(postsRef, where("userId", "==", id), orderBy("time", "desc"));
+             const q = query(postsRef, where("userId", "==", targetUserId), orderBy("time", "desc"));
              const snap = await getDocs(q);
              rawPosts = snap.docs.map(d => ({ id: d.id, ...d.data() }));
              
@@ -120,21 +146,20 @@ export default function PerfilVisitanteScreen() {
         });
 
       } catch (error) {
-        console.error("Error cargando perfil ajeno:", error);
+        console.error("Error cargando perfil:", error);
       } finally {
         setLoading(false);
       }
     };
     loadData();
-  }, [id]);
+  }, [targetUserId]); // Se recarga si cambia el ID
 
-  // 2. Lógica Seguir / Dejar de Seguir
+  // 2. Lógica Seguir
   const handleFollowToggle = async () => {
-    if (!currentUser) return;
+    if (!currentUser || !targetUserId) return;
     if (loadingFollow) return;
 
     setLoadingFollow(true);
-    const targetUserId = id as string;
     const myUserId = currentUser.uid;
 
     const targetUserRef = doc(db, "users", targetUserId);
@@ -142,22 +167,68 @@ export default function PerfilVisitanteScreen() {
 
     try {
         if (isFollowing) {
-            // Dejar de seguir
-            await updateDoc(targetUserRef, { followers: arrayRemove(myUserId) });
+            await setDoc(targetUserRef, { followers: arrayRemove(myUserId) }, { merge: true });
             await deleteDoc(myFollowingRef);
             setIsFollowing(false);
-            setStats(prev => ({ ...prev, followers: prev.followers - 1 }));
+            setStats(prev => ({ ...prev, followers: Math.max(0, prev.followers - 1) }));
         } else {
-            // Seguir
-            await updateDoc(targetUserRef, { followers: arrayUnion(myUserId) });
-            await setDoc(myFollowingRef, { followedAt: new Date() });
+            await setDoc(targetUserRef, { followers: arrayUnion(myUserId) }, { merge: true });
+            await setDoc(myFollowingRef, { 
+                followedAt: new Date(),
+                type: userData?.role || 'usuario'
+            }, { merge: true });
             setIsFollowing(true);
             setStats(prev => ({ ...prev, followers: prev.followers + 1 }));
         }
     } catch (error) {
         console.error("Error follow:", error);
+        Alert.alert("Error", "No se pudo completar la acción.");
     } finally {
         setLoadingFollow(false);
+    }
+  };
+
+  // 3. INICIAR ELIMINACIÓN
+  const initiateDelete = (restaurantId: string, restaurantName: string) => {
+    setRestaurantToDelete({ id: restaurantId, name: restaurantName });
+    setPassword(""); 
+    setDeleteModalVisible(true);
+  };
+
+  // 4. CONFIRMAR CON CONTRASEÑA
+  const confirmDeleteWithPassword = async () => {
+    if (!password) {
+        Alert.alert("Atención", "Debes ingresar tu contraseña.");
+        return;
+    }
+    if (!currentUser || !currentUser.email || !restaurantToDelete) return;
+
+    setLoadingDelete(true);
+
+    try {
+        // Re-autenticar
+        const credential = EmailAuthProvider.credential(currentUser.email, password);
+        await reauthenticateWithCredential(currentUser, credential);
+
+        // Borrar
+        await deleteDoc(doc(db, "restaurants", restaurantToDelete.id));
+        
+        // Actualizar lista visualmente
+        setMyRestaurants(prev => prev.filter(r => r.id !== restaurantToDelete.id));
+        
+        setDeleteModalVisible(false);
+        setRestaurantToDelete(null);
+        Alert.alert("Eliminado", `"${restaurantToDelete.name}" ha sido eliminado.`);
+
+    } catch (error: any) {
+        console.error("Error al eliminar:", error);
+        if (error.code === 'auth/invalid-credential' || error.code === 'auth/wrong-password') {
+            Alert.alert("Error", "Contraseña incorrecta.");
+        } else {
+            Alert.alert("Error", "No se pudo eliminar. Intenta nuevamente.");
+        }
+    } finally {
+        setLoadingDelete(false);
     }
   };
 
@@ -166,16 +237,14 @@ export default function PerfilVisitanteScreen() {
 
   const levelInfo = getLevelInfo(stats.uniqueReviews);
 
-  // --- VISTA PERSONA (Visitante) ---
+  // --- VISTA PERSONA ---
   const renderPersonaView = () => (
     <>
-      {/* Nivel */}
       <View style={styles.levelBadgeContainer}>
         <Ionicons name={levelInfo.icon as any} size={20} color={levelInfo.color} />
         <Text style={[styles.levelText, { color: levelInfo.color }]}>Nivel {levelInfo.label}</Text>
       </View>
 
-      {/* Estadísticas */}
       <View style={styles.statsContainer}>
         <View style={styles.statBox}>
           <Text style={styles.statNumber}>{stats.globalRating > 0 ? stats.globalRating : "-"}</Text>
@@ -201,7 +270,6 @@ export default function PerfilVisitanteScreen() {
         </View>
       ) : (
         posts.map((post) => {
-          // Formato Fecha
           let dateString = "";
           if (post.time && typeof post.time.toDate === 'function') {
              dateString = post.time.toDate().toLocaleDateString("es-MX", {
@@ -215,7 +283,6 @@ export default function PerfilVisitanteScreen() {
               style={styles.reviewCard}
               onPress={() => router.push({ pathname: "/comments/[id]", params: { id: post.id } })}
             >
-               {/* Header: Estrellas y Fecha */}
               <View style={styles.reviewHeader}>
                 <View style={styles.ratingRow}>
                   <Ionicons name="star" size={16} color="#FFD166" />
@@ -223,19 +290,10 @@ export default function PerfilVisitanteScreen() {
                 </View>
                 <Text style={styles.reviewDate}>{dateString}</Text>
               </View>
-              
-              {/* Nombre Restaurante */}
               <Text style={styles.restaurantName}>{post.restaurantName || post.restaurant}</Text>
-              
-              {/* Texto */}
               {post.text ? <Text numberOfLines={3} style={styles.reviewText}>{post.text}</Text> : null}
-              
-              {/* 🟢 FOTO DE LA PUBLICACIÓN */}
               {post.image && (
-                  <Image 
-                    source={{ uri: post.image }} 
-                    style={styles.reviewImage} 
-                  />
+                  <Image source={{ uri: post.image }} style={styles.reviewImage} />
               )}
             </TouchableOpacity>
           );
@@ -244,7 +302,7 @@ export default function PerfilVisitanteScreen() {
     </>
   );
 
-  // --- VISTA NEGOCIO (Visitante) ---
+  // --- VISTA NEGOCIO ---
   const renderBusinessView = () => (
     <>
       <View style={styles.statsContainer}>
@@ -290,7 +348,18 @@ export default function PerfilVisitanteScreen() {
                           <Text style={styles.myRestaurantCity}>{rest.city}</Text>
                       </View>
                   </View>
-                  <Ionicons name="chevron-forward" size={24} color="#CCC" />
+                  
+                  {/* 🗑️ BOTÓN DE ELIMINAR (Solo si es mi perfil) */}
+                  {isMyProfile ? (
+                    <TouchableOpacity 
+                        style={styles.deleteBtn} 
+                        onPress={() => initiateDelete(rest.id, rest.name)}
+                    >
+                        <Ionicons name="trash-outline" size={22} color="#FF4444" />
+                    </TouchableOpacity>
+                  ) : (
+                    <Ionicons name="chevron-forward" size={24} color="#CCC" />
+                  )}
               </TouchableOpacity>
           ))
       )}
@@ -315,7 +384,8 @@ export default function PerfilVisitanteScreen() {
             />
             <Text style={styles.name}>{userData.name}</Text>
             
-            {currentUser?.uid !== id && (
+            {/* Botón Seguir (Solo si NO eres tú) */}
+            {!isMyProfile && (
                 <TouchableOpacity 
                     style={[styles.followBtn, isFollowing ? styles.followingBtn : styles.notFollowingBtn]}
                     onPress={handleFollowToggle}
@@ -336,6 +406,67 @@ export default function PerfilVisitanteScreen() {
             {userData.role === 'negocio' ? renderBusinessView() : renderPersonaView()}
          </View>
       </ScrollView>
+
+      {/* 🔒 MODAL DE SEGURIDAD */}
+      <Modal
+        animationType="fade"
+        transparent={true}
+        visible={deleteModalVisible}
+        onRequestClose={() => setDeleteModalVisible(false)}
+      >
+        <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
+            <View style={styles.modalOverlay}>
+                <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : "height"} style={styles.keyboardView}>
+                    <View style={styles.deleteModalContent}>
+                        <View style={styles.warningIcon}>
+                            <Ionicons name="warning" size={32} color="#FF4444" />
+                        </View>
+                        
+                        <Text style={styles.deleteTitle}>Eliminar Restaurante</Text>
+                        <Text style={styles.deleteMessage}>
+                            Esta acción no se puede deshacer. Ingresa tu contraseña para confirmar.
+                        </Text>
+                        
+                        <Text style={styles.restaurantNameHighlight}>
+                            "{restaurantToDelete?.name}"
+                        </Text>
+
+                        <TextInput
+                            style={styles.passwordInput}
+                            placeholder="Contraseña"
+                            secureTextEntry
+                            value={password}
+                            onChangeText={setPassword}
+                            autoCapitalize="none"
+                        />
+
+                        <View style={styles.modalButtons}>
+                            <TouchableOpacity 
+                                style={styles.modalCancelBtn} 
+                                onPress={() => setDeleteModalVisible(false)}
+                                disabled={loadingDelete}
+                            >
+                                <Text style={styles.modalCancelText}>Cancelar</Text>
+                            </TouchableOpacity>
+
+                            <TouchableOpacity 
+                                style={styles.modalDeleteBtn} 
+                                onPress={confirmDeleteWithPassword}
+                                disabled={loadingDelete}
+                            >
+                                {loadingDelete ? (
+                                    <ActivityIndicator color="#FFF" />
+                                ) : (
+                                    <Text style={styles.modalDeleteText}>Eliminar</Text>
+                                )}
+                            </TouchableOpacity>
+                        </View>
+                    </View>
+                </KeyboardAvoidingView>
+            </View>
+        </TouchableWithoutFeedback>
+      </Modal>
+
     </SafeAreaView>
   );
 }
@@ -356,7 +487,6 @@ const styles = StyleSheet.create({
   followingBtn: { backgroundColor: '#FFF', borderColor: '#3EB489' },
   followText: { fontWeight: '600' },
   
-  statsRow: { flexDirection: 'row', backgroundColor: '#fff', marginTop: 15, padding: 15, borderRadius: 12, marginHorizontal: 16, justifyContent: 'space-around', elevation: 2 },
   statsContainer: { flexDirection: "row", backgroundColor: "#FFF", borderRadius: 12, paddingVertical: 15, marginBottom: 20, shadowColor: "#000", shadowOpacity: 0.05, shadowOffset: { width: 0, height: 2 }, elevation: 2 },
   statBox: { flex: 1, alignItems: "center" },
   statNumber: { fontSize: 18, fontWeight: "bold", color: "#333" },
@@ -369,7 +499,6 @@ const styles = StyleSheet.create({
   contentSection: { padding: 16 },
   sectionTitle: { fontSize: 18, fontWeight: 'bold', marginBottom: 10, color: '#333' },
   
-  // Estilos de Tarjetas de Reseña
   reviewCard: {
     backgroundColor: "#FFF", padding: 15, borderRadius: 12, marginBottom: 15,
     borderWidth: 1, borderColor: "#F0F0F0", shadowColor: "#000", shadowOpacity: 0.05,
@@ -383,7 +512,6 @@ const styles = StyleSheet.create({
   reviewText: { color: "#555", fontSize: 14, lineHeight: 20, marginBottom: 10 },
   reviewImage: { width: '100%', height: 200, borderRadius: 8, resizeMode: 'cover', marginTop: 5 },
 
-  // Estilos Restaurantes
   myRestaurantCard: { flexDirection: 'row', backgroundColor: '#FFF', padding: 12, borderRadius: 16, marginBottom: 12, alignItems: 'center', borderWidth: 1, borderColor: '#F0F0F0', shadowColor: "#000", shadowOpacity: 0.03, shadowOffset: { width: 0, height: 2 }, elevation: 1 },
   myRestaurantImage: { width: 60, height: 60, borderRadius: 12, marginRight: 12 },
   myRestaurantInfo: { flex: 1 },
@@ -391,7 +519,24 @@ const styles = StyleSheet.create({
   myRestaurantCategory: { fontSize: 13, color: COLORS.button, fontWeight: '600', marginBottom: 2 },
   myRestaurantCity: { fontSize: 12, color: '#888' },
   locationRow: { flexDirection: 'row', alignItems: 'center', gap: 2 },
+  
+  deleteBtn: { padding: 10, marginLeft: 5 },
 
   emptyBox: { alignItems: "center", marginTop: 20 },
   emptyTitle: { fontSize: 16, fontWeight: "600", color: "#333" },
+
+  // --- ESTILOS DEL MODAL ---
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'center', alignItems: 'center' },
+  keyboardView: { width: '100%', alignItems: 'center' },
+  deleteModalContent: { width: '85%', backgroundColor: '#FFF', borderRadius: 20, padding: 24, alignItems: 'center', shadowColor: "#000", shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 8, elevation: 10 },
+  warningIcon: { backgroundColor: '#FFEBEE', padding: 12, borderRadius: 50, marginBottom: 15 },
+  deleteTitle: { fontSize: 20, fontWeight: 'bold', color: '#333', marginBottom: 10 },
+  deleteMessage: { fontSize: 14, color: '#666', textAlign: 'center', marginBottom: 10 },
+  restaurantNameHighlight: { fontSize: 16, fontWeight: 'bold', color: '#FF4444', marginBottom: 20, textAlign: 'center' },
+  passwordInput: { width: '100%', borderWidth: 1, borderColor: '#DDD', borderRadius: 12, padding: 12, fontSize: 16, marginBottom: 20, backgroundColor: '#FAFAFA' },
+  modalButtons: { flexDirection: 'row', gap: 12, width: '100%' },
+  modalCancelBtn: { flex: 1, padding: 14, borderRadius: 12, backgroundColor: '#F0F0F0', alignItems: 'center' },
+  modalDeleteBtn: { flex: 1, padding: 14, borderRadius: 12, backgroundColor: '#FF4444', alignItems: 'center' },
+  modalCancelText: { fontWeight: 'bold', color: '#666' },
+  modalDeleteText: { fontWeight: 'bold', color: '#FFF' }
 });
