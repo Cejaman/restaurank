@@ -1,0 +1,65 @@
+{
+  "expo": {
+    "name": "Restaurank",
+    "slug": "restaurank",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/restaurank.png",
+    "scheme": "restaurank",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": false,
+    "splash": {
+      "image": "./assets/images/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.cejapy.restaurank"
+    },
+    "android": {
+      "package": "com.cejapy.restaurank",
+      "googleServicesFile": "./google-services.json",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/images/restaurank.png",
+        "backgroundColor": "#E6F4FE"
+      },
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyD_CLAVE_FALSA_PARA_QUE_NO_CRASHEE"
+        }
+      },
+      "edgeToEdgeEnabled": true,
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "bundler": "metro",
+      "output": "static",
+      "favicon": "./assets/images/favicon.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "newArchEnabled": false
+          },
+          "ios": {
+            "newArchEnabled": false
+          }
+        }
+      ],
+      "expo-font"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "d3e8e49a-4b72-4b51-826d-42694b64842d"
+      }
+    },
+    "owner": "cejapy3"
+  }
+}
